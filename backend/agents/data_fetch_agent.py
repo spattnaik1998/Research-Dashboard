@@ -163,7 +163,7 @@ class DataFetchAgent:
                     "content_snippet": filled_pub.get('bib', {}).get('abstract', ''),
                     "authors": self._extract_authors_from_bib(filled_pub.get('bib', {})),
                     "year": self._extract_year(filled_pub.get('bib', {})),
-                    "venue": filled_pub.get('bib', {}).get('venue', filled_pub.get('bib', {}).get('journal', '')),
+                    "venue": filled_pub.get('bib', {}).get('journal', filled_pub.get('bib', {}).get('venue', '')),
                     "citations": filled_pub.get('num_citations', 0),
                     "doi": None,  # scholarly doesn't always provide DOI
                     "pdf_url": filled_pub.get('eprint_url', ''),
@@ -237,8 +237,8 @@ class DataFetchAgent:
 
     def _extract_year(self, bib: Dict) -> Optional[int]:
         """Extract publication year from bib data."""
-        # Try different year field names
-        year = bib.get('year', bib.get('pub_year', None))
+        # Try different year field names - prioritize pub_year as it's more accurate
+        year = bib.get('pub_year', bib.get('year', None))
 
         if year:
             try:
