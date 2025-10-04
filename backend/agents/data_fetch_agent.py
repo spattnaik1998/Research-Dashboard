@@ -1,13 +1,12 @@
 """
 Data Fetch Agent - Responsible for fetching publication data from Google Scholar
-using the Tavily API for web scraping.
+using the scholarly library for direct Scholar scraping.
 """
 
 import os
 import asyncio
 import re
 from typing import Dict, List, Any, Optional
-from tavily import TavilyClient
 from urllib.parse import urlparse, parse_qs
 import logging
 from datetime import datetime
@@ -29,20 +28,16 @@ class InvalidScholarURLError(Exception):
 class DataFetchAgent:
     """
     Agent responsible for fetching publication data from Google Scholar.
-    Uses Tavily API to scrape and extract publication information.
+    Uses scholarly library to scrape and extract publication information.
     """
 
-    def __init__(self, tavily_api_key: str):
+    def __init__(self, tavily_api_key: str = None):
         """
         Initialize the Data Fetch Agent.
 
         Args:
-            tavily_api_key: API key for Tavily service
+            tavily_api_key: API key for Tavily service (optional, not used in this version)
         """
-        if not tavily_api_key:
-            raise ValueError("Tavily API key cannot be empty")
-
-        self.tavily_client = TavilyClient(api_key=tavily_api_key)
         self.agent_name = "DataFetchAgent"
         self.request_count = 0
         self.last_request_time = None
@@ -64,26 +59,19 @@ class DataFetchAgent:
             # Validate the Google Scholar URL
             self._validate_scholar_url(scholar_url)
 
+            # Extract user ID from URL
+            user_id = self._extract_user_id(scholar_url)
+            logger.info(f"{self.agent_name}: Extracted user ID: {user_id}")
+
             # Check rate limiting
             await self._check_rate_limit()
 
-            # Use Tavily to search for information about the scholar profile
-            search_query = f"Google Scholar profile publications citations {scholar_url}"
-
-            # Perform search using Tavily
-            search_results = await asyncio.to_thread(
-                self.tavily_client.search,
-                query=search_query,
-                search_depth="advanced",
-                max_results=10
-            )
+            # Fetch publications using scholarly library
+            publications = await self._fetch_publications_with_scholarly(user_id, scholar_url)
 
             # Update request tracking
             self.request_count += 1
             self.last_request_time = datetime.utcnow()
-
-            # Extract relevant information
-            publications = await self._parse_scholar_results(search_results, scholar_url)
 
             logger.info(f"{self.agent_name}: Successfully fetched {len(publications)} publications")
 
@@ -120,18 +108,7 @@ class DataFetchAgent:
             error_message = str(e)
             error_type = "unknown"
 
-            # Check if it's a Tavily-specific error
-            if "429" in error_message or "rate limit" in error_message.lower():
-                error_type = "rate_limit"
-                logger.error(f"{self.agent_name}: API rate limit hit")
-            elif "401" in error_message or "unauthorized" in error_message.lower():
-                error_type = "authentication"
-                logger.error(f"{self.agent_name}: Authentication failed - check API key")
-            elif "timeout" in error_message.lower():
-                error_type = "timeout"
-                logger.error(f"{self.agent_name}: Request timeout")
-            else:
-                logger.error(f"{self.agent_name}: Unexpected error - {error_message}")
+            logger.error(f"{self.agent_name}: Unexpected error - {error_message}")
 
             return {
                 "status": "error",
@@ -141,79 +118,135 @@ class DataFetchAgent:
                 "publications": []
             }
 
-    async def _parse_scholar_results(self, search_results: Dict, scholar_url: str) -> List[Dict[str, Any]]:
+    async def _fetch_publications_with_scholarly(self, user_id: str, scholar_url: str) -> List[Dict[str, Any]]:
         """
-        Parse Tavily search results to extract publication information.
+        Fetch publications using the scholarly library.
 
         Args:
-            search_results: Raw results from Tavily search
-            scholar_url: Original scholar URL for reference
+            user_id: Google Scholar user ID
+            scholar_url: Original Scholar URL
 
         Returns:
             List of publication dictionaries
         """
+        from scholarly import scholarly
+
         publications = []
 
-        # Extract publications from search results
-        # This is a placeholder implementation - in production, you'd use more sophisticated parsing
-        if "results" in search_results:
-            for idx, result in enumerate(search_results["results"][:10]):  # Limit to top 10
+        try:
+            logger.info(f"{self.agent_name}: Searching for author with ID: {user_id}")
+
+            # Search for author by ID
+            # Note: scholarly doesn't have direct ID lookup, so we'll use search_author
+            search_query = scholarly.search_author_id(user_id)
+            author = scholarly.fill(search_query)
+
+            logger.info(f"{self.agent_name}: Found author: {author.get('name', 'Unknown')}")
+
+            # Get all publications
+            author_pubs = author.get('publications', [])
+            logger.info(f"{self.agent_name}: Found {len(author_pubs)} publications")
+
+            for idx, pub in enumerate(author_pubs, 1):
+                # Fill publication details (this makes additional requests)
+                try:
+                    filled_pub = scholarly.fill(pub)
+                except Exception as e:
+                    logger.warning(f"{self.agent_name}: Could not fill details for publication {idx}: {e}")
+                    filled_pub = pub
+
+                # Extract publication data
                 publication = {
-                    "id": f"pub_{idx + 1}",
-                    "title": result.get("title", "Unknown Title"),
-                    "url": result.get("url", ""),
-                    "content_snippet": result.get("content", "")[:500],  # First 500 chars
-                    "score": result.get("score", 0.0),
-                    "raw_content": result.get("raw_content", ""),
-                    # These will be enriched by further processing
-                    "authors": [],
-                    "year": None,
-                    "venue": None,
-                    "citations": 0,
-                    "doi": None,
-                    "pdf_url": None,
-                    "abstract": None,
-                    "keywords": [],
-                    "coauthors": [],
+                    "id": f"pub_{idx}",
+                    "title": filled_pub.get('bib', {}).get('title', 'Unknown Title'),
+                    "url": filled_pub.get('pub_url', filled_pub.get('eprint_url', '')),
+                    "content_snippet": filled_pub.get('bib', {}).get('abstract', ''),
+                    "authors": self._extract_authors_from_bib(filled_pub.get('bib', {})),
+                    "year": self._extract_year(filled_pub.get('bib', {})),
+                    "venue": filled_pub.get('bib', {}).get('venue', filled_pub.get('bib', {}).get('journal', '')),
+                    "citations": filled_pub.get('num_citations', 0),
+                    "doi": None,  # scholarly doesn't always provide DOI
+                    "pdf_url": filled_pub.get('eprint_url', ''),
+                    "abstract": filled_pub.get('bib', {}).get('abstract', ''),
+                    "keywords": [],  # We'll extract this later
+                    "coauthors": self._extract_coauthors(filled_pub.get('bib', {})),
                     "scholar_link": scholar_url,
-                    "scrape_timestamp": search_results.get("timestamp", "")
+                    "scrape_timestamp": datetime.utcnow().isoformat()
                 }
+
                 publications.append(publication)
+
+                # Add small delay to avoid rate limiting
+                await asyncio.sleep(0.5)
+
+        except Exception as e:
+            logger.error(f"{self.agent_name}: Error fetching publications with scholarly: {e}")
+            raise
 
         return publications
 
-    async def fetch_publication_details(self, publication_url: str) -> Dict[str, Any]:
+    def _extract_user_id(self, scholar_url: str) -> str:
         """
-        Fetch detailed information about a specific publication.
+        Extract user ID from Google Scholar URL.
 
         Args:
-            publication_url: URL of the publication
+            scholar_url: Google Scholar profile URL
 
         Returns:
-            Dictionary with detailed publication information
+            User ID string
+
+        Raises:
+            InvalidScholarURLError: If user ID cannot be extracted
         """
-        logger.info(f"{self.agent_name}: Fetching details for {publication_url}")
+        parsed = urlparse(scholar_url)
+        query_params = parse_qs(parsed.query)
 
-        try:
-            # Use Tavily extract for detailed content
-            details = await asyncio.to_thread(
-                self.tavily_client.extract,
-                urls=[publication_url]
-            )
+        user_id = query_params.get('user', [None])[0]
 
-            return {
-                "status": "success",
-                "url": publication_url,
-                "details": details
-            }
+        if not user_id:
+            raise InvalidScholarURLError("Could not extract user ID from URL")
 
-        except Exception as e:
-            logger.error(f"{self.agent_name}: Error fetching publication details - {str(e)}")
-            return {
-                "status": "error",
-                "url": publication_url,
-                "error": str(e)
-            }
+        return user_id
+
+    def _extract_authors_from_bib(self, bib: Dict) -> List[str]:
+        """Extract authors list from bib data."""
+        authors = []
+
+        # Try different author field names
+        author_str = bib.get('author', '')
+
+        if isinstance(author_str, list):
+            return author_str[:5]  # Limit to 5
+        elif isinstance(author_str, str):
+            # Split by ' and ' or ','
+            if ' and ' in author_str:
+                authors = [a.strip() for a in author_str.split(' and ')]
+            elif ',' in author_str:
+                # Handle "Last, First and Last, First" format
+                parts = author_str.split(',')
+                authors = [p.strip() for p in parts if p.strip() and ' and ' not in p]
+            else:
+                authors = [author_str]
+
+        return authors[:5]  # Limit to 5
+
+    def _extract_coauthors(self, bib: Dict) -> List[str]:
+        """Extract co-authors (all authors except first)."""
+        authors = self._extract_authors_from_bib(bib)
+        return authors[1:] if len(authors) > 1 else []
+
+    def _extract_year(self, bib: Dict) -> Optional[int]:
+        """Extract publication year from bib data."""
+        # Try different year field names
+        year = bib.get('year', bib.get('pub_year', None))
+
+        if year:
+            try:
+                return int(year)
+            except (ValueError, TypeError):
+                pass
+
+        return None
 
     def _validate_scholar_url(self, url: str) -> None:
         """
@@ -290,7 +323,6 @@ class DataFetchAgent:
             "last_request": self.last_request_time.isoformat() if self.last_request_time else None,
             "capabilities": [
                 "fetch_scholar_data",
-                "fetch_publication_details",
                 "validate_scholar_url",
                 "rate_limiting"
             ]
