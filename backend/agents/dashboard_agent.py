@@ -5,8 +5,9 @@ for visualization and dashboard presentation.
 
 import asyncio
 import re
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional, Tuple
 from collections import Counter
+from datetime import datetime
 import logging
 
 logging.basicConfig(level=logging.INFO)
@@ -46,8 +47,11 @@ class DashboardAgent:
             # Deduplicate publications
             deduplicated_pubs = await self._deduplicate_publications(processed_pubs)
 
-            # Generate analytics
+            # Generate comprehensive analytics
             analytics = await self._generate_analytics(deduplicated_pubs)
+
+            # Calculate advanced metrics
+            metrics = await self._calculate_advanced_metrics(deduplicated_pubs)
 
             logger.info(f"{self.agent_name}: Successfully processed {len(deduplicated_pubs)} unique publications")
 
@@ -56,8 +60,10 @@ class DashboardAgent:
                 "agent": self.agent_name,
                 "publications": deduplicated_pubs,
                 "analytics": analytics,
+                "metrics": metrics,
                 "total_publications": len(deduplicated_pubs),
-                "data_completeness": self._calculate_completeness(deduplicated_pubs)
+                "data_completeness": self._calculate_completeness(deduplicated_pubs),
+                "timestamp": datetime.utcnow().isoformat()
             }
 
         except Exception as e:
@@ -67,7 +73,8 @@ class DashboardAgent:
                 "agent": self.agent_name,
                 "error": str(e),
                 "publications": [],
-                "analytics": {}
+                "analytics": {},
+                "metrics": {}
             }
 
     async def _enrich_publication(self, publication: Dict[str, Any]) -> Dict[str, Any]:
@@ -92,6 +99,9 @@ class DashboardAgent:
         # Extract keywords
         keywords = self._extract_keywords(publication.get("content_snippet", ""))
 
+        # Extract or estimate citations
+        citations = self._extract_citations(publication.get("content_snippet", ""))
+
         # Update publication with enriched data
         enriched = publication.copy()
         enriched.update({
@@ -99,12 +109,13 @@ class DashboardAgent:
             "authors": authors if authors else publication.get("authors", []),
             "venue": venue or publication.get("venue"),
             "keywords": keywords if keywords else publication.get("keywords", []),
+            "citations": citations if citations is not None else publication.get("citations", 0),
             "coauthors": authors[1:] if len(authors) > 1 else [],  # All authors except first
         })
 
         return enriched
 
-    def _extract_year(self, text: str) -> int:
+    def _extract_year(self, text: str) -> Optional[int]:
         """Extract publication year from text."""
         # Look for 4-digit years between 1990 and 2030
         year_pattern = r'\b(19[9]\d|20[0-3]\d)\b'
@@ -115,12 +126,9 @@ class DashboardAgent:
 
     def _extract_authors(self, text: str) -> List[str]:
         """Extract author names from text (simplified extraction)."""
-        # This is a simplified implementation
-        # In production, use more sophisticated NLP or structured data extraction
         authors = []
 
         # Look for patterns like "FirstName LastName, FirstName LastName"
-        # This is a basic heuristic
         author_pattern = r'\b([A-Z][a-z]+\s+[A-Z][a-z]+)\b'
         potential_authors = re.findall(author_pattern, text)
 
@@ -133,9 +141,8 @@ class DashboardAgent:
 
         return authors
 
-    def _extract_venue(self, text: str) -> str:
+    def _extract_venue(self, text: str) -> Optional[str]:
         """Extract venue/conference/journal name from text."""
-        # Look for common venue indicators
         venue_patterns = [
             r'(?:Conference|Journal|Proceedings|Workshop|Symposium)\s+(?:on|of)\s+([^.,]+)',
             r'(?:published in|appeared in)\s+([^.,]+)',
@@ -150,18 +157,34 @@ class DashboardAgent:
 
     def _extract_keywords(self, text: str) -> List[str]:
         """Extract potential keywords from text."""
-        # This is a simplified keyword extraction
-        # In production, use TF-IDF, topic modeling, or NLP libraries
         common_cs_keywords = [
             'machine learning', 'deep learning', 'neural network', 'artificial intelligence',
-            'nlp', 'computer vision', 'data mining', 'security', 'privacy', 'blockchain',
-            'cloud computing', 'distributed systems', 'algorithms', 'optimization'
+            'nlp', 'natural language processing', 'computer vision', 'data mining',
+            'security', 'privacy', 'blockchain', 'cloud computing', 'distributed systems',
+            'algorithms', 'optimization', 'data science', 'big data', 'iot',
+            'reinforcement learning', 'database', 'software engineering'
         ]
 
         text_lower = text.lower()
         found_keywords = [kw for kw in common_cs_keywords if kw in text_lower]
 
         return found_keywords[:5]  # Limit to top 5
+
+    def _extract_citations(self, text: str) -> Optional[int]:
+        """Extract citation count from text."""
+        # Look for patterns like "cited by 123", "123 citations"
+        citation_patterns = [
+            r'cited by (\d+)',
+            r'(\d+)\s+citations?',
+            r'citations?:\s*(\d+)'
+        ]
+
+        for pattern in citation_patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                return int(match.group(1))
+
+        return None
 
     async def _deduplicate_publications(self, publications: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
@@ -180,8 +203,6 @@ class DashboardAgent:
             # Normalize title for comparison
             title = pub.get("title", "").lower().strip()
 
-            # Simple deduplication based on exact title match
-            # In production, use fuzzy matching or edit distance
             if title and title not in seen_titles:
                 seen_titles.add(title)
                 unique_pubs.append(pub)
@@ -241,6 +262,164 @@ class DashboardAgent:
 
         return analytics
 
+    async def _calculate_advanced_metrics(self, publications: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Calculate advanced metrics for the researcher.
+
+        Args:
+            publications: List of publications
+
+        Returns:
+            Dictionary with advanced metrics including h-index, i10-index, etc.
+        """
+        # Calculate h-index
+        h_index = self._calculate_h_index(publications)
+
+        # Calculate i10-index (papers with >= 10 citations)
+        i10_index = sum(1 for pub in publications if pub.get("citations", 0) >= 10)
+
+        # Get top 5 co-authors
+        all_coauthors = []
+        for pub in publications:
+            all_coauthors.extend(pub.get("coauthors", []))
+        top_coauthors = Counter(all_coauthors).most_common(5)
+
+        # Get most cited paper
+        most_cited_paper = self._get_most_cited_paper(publications)
+
+        # Citation trends by year
+        citation_trends = self._calculate_citation_trends(publications)
+
+        # Total publications
+        total_publications = len(publications)
+
+        # Publications by year
+        publications_by_year = self._get_publications_by_year(publications)
+
+        metrics = {
+            "h_index": h_index,
+            "i10_index": i10_index,
+            "total_publications": total_publications,
+            "top_5_coauthors": [
+                {"name": name, "collaborations": count}
+                for name, count in top_coauthors
+            ],
+            "most_cited_paper": most_cited_paper,
+            "citation_trends_by_year": citation_trends,
+            "publications_by_year": publications_by_year,
+            "total_citations": sum(pub.get("citations", 0) for pub in publications),
+            "average_citations_per_paper": round(
+                sum(pub.get("citations", 0) for pub in publications) / len(publications)
+                if publications else 0,
+                2
+            )
+        }
+
+        return metrics
+
+    def _calculate_h_index(self, publications: List[Dict[str, Any]]) -> int:
+        """
+        Calculate h-index: the largest number h such that h publications
+        have at least h citations each.
+
+        Args:
+            publications: List of publications
+
+        Returns:
+            h-index value
+        """
+        # Get citation counts and sort in descending order
+        citations = sorted(
+            [pub.get("citations", 0) for pub in publications],
+            reverse=True
+        )
+
+        h_index = 0
+        for i, citation_count in enumerate(citations, start=1):
+            if citation_count >= i:
+                h_index = i
+            else:
+                break
+
+        return h_index
+
+    def _get_most_cited_paper(self, publications: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Get the most cited paper.
+
+        Args:
+            publications: List of publications
+
+        Returns:
+            Dictionary with most cited paper details
+        """
+        if not publications:
+            return {
+                "title": "N/A",
+                "citations": 0,
+                "year": None,
+                "url": None
+            }
+
+        most_cited = max(publications, key=lambda p: p.get("citations", 0))
+
+        return {
+            "title": most_cited.get("title", "Unknown"),
+            "citations": most_cited.get("citations", 0),
+            "year": most_cited.get("year"),
+            "url": most_cited.get("url"),
+            "authors": most_cited.get("authors", []),
+            "venue": most_cited.get("venue")
+        }
+
+    def _calculate_citation_trends(self, publications: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Calculate citation trends by year.
+
+        Args:
+            publications: List of publications
+
+        Returns:
+            List of citation counts by year
+        """
+        # Group citations by publication year
+        year_citations = {}
+        for pub in publications:
+            year = pub.get("year")
+            citations = pub.get("citations", 0)
+            if year:
+                if year not in year_citations:
+                    year_citations[year] = 0
+                year_citations[year] += citations
+
+        # Convert to sorted list
+        trends = [
+            {"year": year, "citations": citations}
+            for year, citations in sorted(year_citations.items())
+        ]
+
+        return trends
+
+    def _get_publications_by_year(self, publications: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Get publication count by year.
+
+        Args:
+            publications: List of publications
+
+        Returns:
+            List of publication counts by year
+        """
+        years = [pub.get("year") for pub in publications if pub.get("year")]
+        year_counts = Counter(years)
+
+        by_year = [
+            {"year": year, "count": count}
+            for year, count in sorted(year_counts.items())
+        ]
+
+        return by_year
+
     def _generate_timeline(self, publications: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Generate publication timeline data."""
         years = [pub.get("year") for pub in publications if pub.get("year")]
@@ -276,13 +455,14 @@ class DashboardAgent:
 
         return {
             "trend": "growing" if growth_rate > 0 else "declining" if growth_rate < 0 else "stable",
-            "growth_rate": round(growth_rate, 2)
+            "growth_rate": round(growth_rate, 2),
+            "recent_year": sorted_years[-1][0],
+            "recent_year_count": recent_year_count
         }
 
     def _calculate_completeness(self, publications: List[Dict[str, Any]]) -> float:
         """
         Calculate data completeness percentage.
-        A publication is considered complete if it has: title, year, and at least one author.
 
         Args:
             publications: List of publications
@@ -319,6 +499,11 @@ class DashboardAgent:
                 "process_publications",
                 "deduplicate_publications",
                 "generate_analytics",
+                "calculate_h_index",
+                "calculate_i10_index",
+                "calculate_citation_trends",
+                "identify_top_coauthors",
+                "find_most_cited_paper",
                 "calculate_completeness"
             ]
         }

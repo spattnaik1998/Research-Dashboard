@@ -71,6 +71,26 @@ class FetchPublicationsRequest(BaseModel):
         }
 
 
+class ProcessDashboardRequest(BaseModel):
+    """Request model for processing dashboard data."""
+    publications: list
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "publications": [
+                    {
+                        "title": "Sample Paper",
+                        "authors": ["Author One", "Author Two"],
+                        "year": 2023,
+                        "citations": 10,
+                        "venue": "Sample Conference"
+                    }
+                ]
+            }
+        }
+
+
 class FetchPublicationsResponse(BaseModel):
     """Response model for fetch publications endpoint."""
     status: str
@@ -89,6 +109,7 @@ async def root():
         "version": "1.0.0",
         "endpoints": {
             "fetch_publications": "/fetch_publications",
+            "process_dashboard": "/process_dashboard",
             "agent_status": "/agent_status",
             "execution_history": "/execution_history"
         }
@@ -171,6 +192,73 @@ async def fetch_publications(request: FetchPublicationsRequest = None):
         raise
     except Exception as e:
         logger.error(f"Unexpected error in fetch_publications: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Internal server error: {str(e)}"
+        )
+
+
+@app.post("/process_dashboard")
+async def process_dashboard(request: ProcessDashboardRequest):
+    """
+    Process publication data and generate dashboard metrics.
+
+    This endpoint takes raw publication data and returns:
+    - Total publications count
+    - h-index and i10-index
+    - Citation trends by year
+    - Top 5 co-authors
+    - Most cited paper
+    - Publications by year
+    - Various analytics ready for frontend visualization
+
+    Args:
+        request: Request body containing list of publications
+
+    Returns:
+        JSON with comprehensive metrics and analytics
+    """
+    try:
+        logger.info(f"Processing {len(request.publications)} publications for dashboard")
+
+        if not request.publications:
+            raise HTTPException(
+                status_code=400,
+                detail="Publications list cannot be empty"
+            )
+
+        # Process publications using Dashboard Agent
+        result = await dashboard_agent.process_publications(request.publications)
+
+        if result.get("status") == "error":
+            logger.error(f"Dashboard processing failed: {result.get('error')}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Dashboard processing failed: {result.get('error')}"
+            )
+
+        logger.info(f"Dashboard processing completed successfully. Metrics generated.")
+
+        # Return structured response for frontend
+        return {
+            "status": "success",
+            "metrics": result.get("metrics", {}),
+            "analytics": result.get("analytics", {}),
+            "summary": {
+                "total_publications": result.get("total_publications", 0),
+                "data_completeness": result.get("data_completeness", 0),
+                "h_index": result.get("metrics", {}).get("h_index", 0),
+                "i10_index": result.get("metrics", {}).get("i10_index", 0),
+                "total_citations": result.get("metrics", {}).get("total_citations", 0)
+            },
+            "publications": result.get("publications", []),
+            "timestamp": result.get("timestamp")
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Unexpected error in process_dashboard: {str(e)}", exc_info=True)
         raise HTTPException(
             status_code=500,
             detail=f"Internal server error: {str(e)}"
