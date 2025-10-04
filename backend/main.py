@@ -108,6 +108,7 @@ async def root():
         "status": "running",
         "version": "1.0.0",
         "endpoints": {
+            "run_workflow": "/run_workflow",
             "fetch_publications": "/fetch_publications",
             "process_dashboard": "/process_dashboard",
             "agent_status": "/agent_status",
@@ -127,6 +128,107 @@ async def health_check():
             "dashboard": dashboard_agent.get_agent_status()
         }
     }
+
+
+@app.post("/run_workflow")
+async def run_workflow(request: FetchPublicationsRequest = None):
+    """
+    Execute the complete multi-agent workflow in a single call.
+
+    This endpoint orchestrates the entire pipeline:
+    1. Supervisor Agent coordinates the workflow
+    2. Data Fetch Agent retrieves publications from Google Scholar
+    3. Dashboard Agent processes data and generates metrics
+    4. Returns comprehensive results with metrics, analytics, and publications
+
+    The workflow includes:
+    - Automatic retries on failures (up to 3 attempts)
+    - Data validation and quality checks
+    - Comprehensive logging at each step
+    - Error classification and clear error messages
+
+    Args:
+        request: Optional request body with scholar_url. If not provided, uses env variable.
+
+    Returns:
+        Complete workflow results including:
+        - Publications list
+        - Metrics (h-index, i10-index, total citations)
+        - Analytics (year distribution, top venues, keywords, coauthors)
+        - Summary statistics
+        - Execution log with timestamps
+        - Stage-by-stage status
+    """
+    try:
+        # Determine which scholar URL to use
+        if request and request.scholar_url:
+            scholar_url = str(request.scholar_url)
+            logger.info(f"Using scholar URL from request: {scholar_url}")
+        elif GOOGLE_SCHOLAR_URL:
+            scholar_url = GOOGLE_SCHOLAR_URL
+            logger.info(f"Using scholar URL from environment: {scholar_url}")
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail="No scholar_url provided in request or environment variables"
+            )
+
+        logger.info(f"\n{'='*80}")
+        logger.info(f"API: Starting complete workflow for: {scholar_url}")
+        logger.info(f"{'='*80}\n")
+
+        # Execute the complete pipeline through Supervisor Agent
+        result = await supervisor_agent.execute_pipeline(scholar_url)
+
+        if result.get("status") == "error":
+            error_type = result.get("error_type", "unknown_error")
+            error_detail = result.get("error", "Unknown error occurred")
+
+            logger.error(f"API: Workflow failed with {error_type}: {error_detail}")
+
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "message": "Workflow execution failed",
+                    "error": error_detail,
+                    "error_type": error_type,
+                    "stages": result.get("stages", {}),
+                    "execution_log": result.get("execution_log", [])
+                }
+            )
+
+        logger.info(f"\n{'='*80}")
+        logger.info(f"API: ✓ Workflow completed successfully")
+        logger.info(f"API: Publications: {result.get('summary', {}).get('total_publications', 0)}")
+        logger.info(f"API: h-index: {result.get('summary', {}).get('h_index', 0)}")
+        logger.info(f"API: Duration: {result.get('duration_seconds', 0)}s")
+        logger.info(f"{'='*80}\n")
+
+        # Return complete structured response
+        return {
+            "status": "success",
+            "workflow": {
+                "scholar_url": result.get("scholar_url"),
+                "duration_seconds": result.get("duration_seconds"),
+                "pipeline_start": result.get("pipeline_start"),
+                "pipeline_end": result.get("pipeline_end")
+            },
+            "summary": result.get("summary", {}),
+            "metrics": result.get("metrics", {}),
+            "analytics": result.get("analytics", {}),
+            "publications": result.get("publications", []),
+            "stages": result.get("stages", {}),
+            "execution_log": result.get("execution_log", [])
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"API: Unexpected error in run_workflow: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Internal server error: {str(e)}"
+        )
 
 
 @app.post("/fetch_publications")

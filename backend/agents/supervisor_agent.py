@@ -42,20 +42,30 @@ class SupervisorAgent:
             scholar_url: Google Scholar profile URL
 
         Returns:
-            Dictionary containing the complete pipeline results
+            Dictionary containing the complete pipeline results with metrics and analytics
         """
         pipeline_start = datetime.utcnow()
-        logger.info(f"{self.agent_name}: Starting pipeline execution for {scholar_url}")
+        logger.info("=" * 80)
+        logger.info(f"{self.agent_name}: STARTING WORKFLOW EXECUTION")
+        logger.info(f"{self.agent_name}: Scholar URL: {scholar_url}")
+        logger.info(f"{self.agent_name}: Start Time: {pipeline_start.isoformat()}")
+        logger.info("=" * 80)
 
         pipeline_result = {
             "status": "started",
             "scholar_url": scholar_url,
             "pipeline_start": pipeline_start.isoformat(),
-            "stages": {}
+            "stages": {},
+            "execution_log": []
         }
 
         try:
             # Stage 1: Fetch data from Google Scholar
+            logger.info(f"\n{self.agent_name}: STAGE 1 - DATA FETCH")
+            logger.info(f"{self.agent_name}: Delegating to Data Fetch Agent...")
+
+            self._log_step(pipeline_result, "Starting data fetch from Google Scholar")
+
             fetch_result = await self._execute_with_retry(
                 self._fetch_stage,
                 scholar_url,
@@ -64,20 +74,44 @@ class SupervisorAgent:
 
             pipeline_result["stages"]["fetch"] = {
                 "status": fetch_result.get("status"),
-                "publications_count": fetch_result.get("publications_count", 0)
+                "publications_count": fetch_result.get("publications_count", 0),
+                "timestamp": fetch_result.get("timestamp")
             }
 
             if fetch_result.get("status") != "success":
-                raise Exception(f"Data fetch stage failed: {fetch_result.get('error')}")
+                error_msg = f"Data fetch stage failed: {fetch_result.get('error')}"
+                logger.error(f"{self.agent_name}: {error_msg}")
+                self._log_step(pipeline_result, error_msg, level="error")
+                raise Exception(error_msg)
+
+            logger.info(f"{self.agent_name}: ✓ Data Fetch Complete - {fetch_result.get('publications_count', 0)} publications fetched")
+            self._log_step(pipeline_result, f"Data fetch successful: {fetch_result.get('publications_count', 0)} publications")
 
             # Stage 2: Validate fetched data
+            logger.info(f"\n{self.agent_name}: STAGE 2 - DATA VALIDATION")
+            logger.info(f"{self.agent_name}: Validating fetched publications...")
+
+            self._log_step(pipeline_result, "Validating fetched data quality")
+
             validation_result = await self._validate_fetched_data(fetch_result)
             pipeline_result["stages"]["validation"] = validation_result
 
             if not validation_result.get("is_valid"):
-                logger.warning(f"{self.agent_name}: Validation warnings: {validation_result.get('warnings')}")
+                warnings = validation_result.get("warnings", [])
+                logger.warning(f"{self.agent_name}: ⚠ Validation warnings detected:")
+                for warning in warnings:
+                    logger.warning(f"{self.agent_name}:   - {warning}")
+                self._log_step(pipeline_result, f"Validation warnings: {', '.join(warnings)}", level="warning")
+            else:
+                logger.info(f"{self.agent_name}: ✓ Validation Complete - Data quality acceptable")
+                self._log_step(pipeline_result, "Data validation passed")
 
             # Stage 3: Process and prepare dashboard data
+            logger.info(f"\n{self.agent_name}: STAGE 3 - DASHBOARD PROCESSING")
+            logger.info(f"{self.agent_name}: Delegating to Dashboard Agent...")
+
+            self._log_step(pipeline_result, "Processing publications for dashboard metrics")
+
             dashboard_result = await self._execute_with_retry(
                 self._dashboard_stage,
                 fetch_result.get("publications", []),
@@ -87,15 +121,32 @@ class SupervisorAgent:
             pipeline_result["stages"]["dashboard"] = {
                 "status": dashboard_result.get("status"),
                 "total_publications": dashboard_result.get("total_publications", 0),
-                "data_completeness": dashboard_result.get("data_completeness", 0)
+                "data_completeness": dashboard_result.get("data_completeness", 0),
+                "h_index": dashboard_result.get("metrics", {}).get("h_index", 0),
+                "total_citations": dashboard_result.get("metrics", {}).get("total_citations", 0)
             }
 
             if dashboard_result.get("status") != "success":
-                raise Exception(f"Dashboard stage failed: {dashboard_result.get('error')}")
+                error_msg = f"Dashboard stage failed: {dashboard_result.get('error')}"
+                logger.error(f"{self.agent_name}: {error_msg}")
+                self._log_step(pipeline_result, error_msg, level="error")
+                raise Exception(error_msg)
 
-            # Final assembly
+            logger.info(f"{self.agent_name}: ✓ Dashboard Processing Complete")
+            logger.info(f"{self.agent_name}:   - h-index: {dashboard_result.get('metrics', {}).get('h_index', 0)}")
+            logger.info(f"{self.agent_name}:   - Total Citations: {dashboard_result.get('metrics', {}).get('total_citations', 0)}")
+            logger.info(f"{self.agent_name}:   - Data Completeness: {dashboard_result.get('data_completeness', 0)}%")
+
+            self._log_step(pipeline_result, f"Dashboard processing successful - h-index: {dashboard_result.get('metrics', {}).get('h_index', 0)}")
+
+            # Stage 4: Final assembly and result preparation
             pipeline_end = datetime.utcnow()
             pipeline_duration = (pipeline_end - pipeline_start).total_seconds()
+
+            logger.info(f"\n{self.agent_name}: STAGE 4 - FINAL ASSEMBLY")
+            logger.info(f"{self.agent_name}: Preparing final response...")
+
+            self._log_step(pipeline_result, "Assembling final results")
 
             final_result = {
                 "status": "success",
@@ -105,31 +156,56 @@ class SupervisorAgent:
                 "pipeline_end": pipeline_end.isoformat(),
                 "duration_seconds": round(pipeline_duration, 2),
                 "publications": dashboard_result.get("publications", []),
+                "metrics": dashboard_result.get("metrics", {}),
                 "analytics": dashboard_result.get("analytics", {}),
-                "metadata": {
+                "summary": {
                     "total_publications": dashboard_result.get("total_publications", 0),
                     "data_completeness": dashboard_result.get("data_completeness", 0),
+                    "h_index": dashboard_result.get("metrics", {}).get("h_index", 0),
+                    "i10_index": dashboard_result.get("metrics", {}).get("i10_index", 0),
+                    "total_citations": dashboard_result.get("metrics", {}).get("total_citations", 0),
                     "validation_warnings": validation_result.get("warnings", [])
                 },
-                "stages": pipeline_result["stages"]
+                "stages": pipeline_result["stages"],
+                "execution_log": pipeline_result["execution_log"]
             }
 
-            logger.info(f"{self.agent_name}: Pipeline completed successfully in {pipeline_duration:.2f}s")
+            logger.info("=" * 80)
+            logger.info(f"{self.agent_name}: ✓ WORKFLOW COMPLETED SUCCESSFULLY")
+            logger.info(f"{self.agent_name}: Duration: {pipeline_duration:.2f}s")
+            logger.info(f"{self.agent_name}: Publications: {final_result['summary']['total_publications']}")
+            logger.info(f"{self.agent_name}: h-index: {final_result['summary']['h_index']}")
+            logger.info(f"{self.agent_name}: Total Citations: {final_result['summary']['total_citations']}")
+            logger.info("=" * 80)
+
+            self._log_step(pipeline_result, f"Pipeline completed successfully in {pipeline_duration:.2f}s", level="success")
             self._log_execution(final_result)
 
             return final_result
 
         except Exception as e:
-            logger.error(f"{self.agent_name}: Pipeline failed - {str(e)}")
             pipeline_end = datetime.utcnow()
+            pipeline_duration = (pipeline_end - pipeline_start).total_seconds()
+
+            logger.error("=" * 80)
+            logger.error(f"{self.agent_name}: ✗ WORKFLOW FAILED")
+            logger.error(f"{self.agent_name}: Error: {str(e)}")
+            logger.error(f"{self.agent_name}: Duration before failure: {pipeline_duration:.2f}s")
+            logger.error("=" * 80)
+
+            self._log_step(pipeline_result, f"Pipeline failed: {str(e)}", level="error")
+
             error_result = {
                 "status": "error",
                 "agent": self.agent_name,
                 "error": str(e),
+                "error_type": self._classify_error(str(e)),
                 "scholar_url": scholar_url,
                 "pipeline_start": pipeline_start.isoformat(),
                 "pipeline_end": pipeline_end.isoformat(),
-                "stages": pipeline_result.get("stages", {})
+                "duration_seconds": round(pipeline_duration, 2),
+                "stages": pipeline_result.get("stages", {}),
+                "execution_log": pipeline_result.get("execution_log", [])
             }
             self._log_execution(error_result)
             return error_result
@@ -265,6 +341,49 @@ class SupervisorAgent:
         logger.info(f"{self.agent_name}: Validation result - Valid: {is_valid}, Warnings: {len(warnings)}")
         return validation_result
 
+    def _log_step(self, pipeline_result: Dict[str, Any], message: str, level: str = "info") -> None:
+        """
+        Log a step in the pipeline execution.
+
+        Args:
+            pipeline_result: The pipeline result dictionary to update
+            message: Log message
+            level: Log level (info, warning, error, success)
+        """
+        log_entry = {
+            "timestamp": datetime.utcnow().isoformat(),
+            "level": level,
+            "message": message
+        }
+        pipeline_result["execution_log"].append(log_entry)
+
+    def _classify_error(self, error_message: str) -> str:
+        """
+        Classify error type based on error message.
+
+        Args:
+            error_message: The error message string
+
+        Returns:
+            Error classification
+        """
+        error_lower = error_message.lower()
+
+        if "data fetch" in error_lower:
+            return "data_fetch_error"
+        elif "dashboard" in error_lower:
+            return "dashboard_processing_error"
+        elif "validation" in error_lower:
+            return "validation_error"
+        elif "rate limit" in error_lower or "429" in error_lower:
+            return "rate_limit_error"
+        elif "authentication" in error_lower or "401" in error_lower:
+            return "authentication_error"
+        elif "timeout" in error_lower:
+            return "timeout_error"
+        else:
+            return "unknown_error"
+
     def _log_execution(self, result: Dict[str, Any]) -> None:
         """
         Log pipeline execution for observability.
@@ -277,7 +396,8 @@ class SupervisorAgent:
             "status": result.get("status"),
             "scholar_url": result.get("scholar_url"),
             "duration": result.get("duration_seconds"),
-            "publications_count": result.get("metadata", {}).get("total_publications", 0)
+            "publications_count": result.get("summary", {}).get("total_publications", 0),
+            "h_index": result.get("summary", {}).get("h_index", 0)
         }
 
         self.execution_log.append(log_entry)
