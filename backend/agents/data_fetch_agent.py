@@ -5,12 +5,25 @@ using the Tavily API for web scraping.
 
 import os
 import asyncio
-from typing import Dict, List, Any
+import re
+from typing import Dict, List, Any, Optional
 from tavily import TavilyClient
+from urllib.parse import urlparse, parse_qs
 import logging
+from datetime import datetime
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+class RateLimitError(Exception):
+    """Custom exception for rate limit errors."""
+    pass
+
+
+class InvalidScholarURLError(Exception):
+    """Custom exception for invalid Google Scholar URLs."""
+    pass
 
 
 class DataFetchAgent:
@@ -26,8 +39,13 @@ class DataFetchAgent:
         Args:
             tavily_api_key: API key for Tavily service
         """
+        if not tavily_api_key:
+            raise ValueError("Tavily API key cannot be empty")
+
         self.tavily_client = TavilyClient(api_key=tavily_api_key)
         self.agent_name = "DataFetchAgent"
+        self.request_count = 0
+        self.last_request_time = None
         logger.info(f"{self.agent_name} initialized successfully")
 
     async def fetch_scholar_data(self, scholar_url: str) -> Dict[str, Any]:
@@ -43,6 +61,12 @@ class DataFetchAgent:
         logger.info(f"{self.agent_name}: Starting to fetch data from {scholar_url}")
 
         try:
+            # Validate the Google Scholar URL
+            self._validate_scholar_url(scholar_url)
+
+            # Check rate limiting
+            await self._check_rate_limit()
+
             # Use Tavily to search for information about the scholar profile
             search_query = f"Google Scholar profile publications citations {scholar_url}"
 
@@ -53,6 +77,10 @@ class DataFetchAgent:
                 search_depth="advanced",
                 max_results=10
             )
+
+            # Update request tracking
+            self.request_count += 1
+            self.last_request_time = datetime.utcnow()
 
             # Extract relevant information
             publications = await self._parse_scholar_results(search_results, scholar_url)
@@ -65,15 +93,51 @@ class DataFetchAgent:
                 "scholar_url": scholar_url,
                 "publications_count": len(publications),
                 "publications": publications,
-                "raw_search_results": search_results
+                "timestamp": datetime.utcnow().isoformat()
             }
 
-        except Exception as e:
-            logger.error(f"{self.agent_name}: Error fetching data - {str(e)}")
+        except InvalidScholarURLError as e:
+            logger.error(f"{self.agent_name}: Invalid Scholar URL - {str(e)}")
             return {
                 "status": "error",
                 "agent": self.agent_name,
+                "error_type": "invalid_url",
                 "error": str(e),
+                "publications": []
+            }
+
+        except RateLimitError as e:
+            logger.error(f"{self.agent_name}: Rate limit exceeded - {str(e)}")
+            return {
+                "status": "error",
+                "agent": self.agent_name,
+                "error_type": "rate_limit",
+                "error": str(e),
+                "publications": []
+            }
+
+        except Exception as e:
+            error_message = str(e)
+            error_type = "unknown"
+
+            # Check if it's a Tavily-specific error
+            if "429" in error_message or "rate limit" in error_message.lower():
+                error_type = "rate_limit"
+                logger.error(f"{self.agent_name}: API rate limit hit")
+            elif "401" in error_message or "unauthorized" in error_message.lower():
+                error_type = "authentication"
+                logger.error(f"{self.agent_name}: Authentication failed - check API key")
+            elif "timeout" in error_message.lower():
+                error_type = "timeout"
+                logger.error(f"{self.agent_name}: Request timeout")
+            else:
+                logger.error(f"{self.agent_name}: Unexpected error - {error_message}")
+
+            return {
+                "status": "error",
+                "agent": self.agent_name,
+                "error_type": error_type,
+                "error": error_message,
                 "publications": []
             }
 
@@ -151,6 +215,67 @@ class DataFetchAgent:
                 "error": str(e)
             }
 
+    def _validate_scholar_url(self, url: str) -> None:
+        """
+        Validate that the provided URL is a valid Google Scholar profile URL.
+
+        Args:
+            url: URL to validate
+
+        Raises:
+            InvalidScholarURLError: If URL is invalid or malformed
+        """
+        if not url or not isinstance(url, str):
+            raise InvalidScholarURLError("URL cannot be empty or non-string")
+
+        # Parse the URL
+        try:
+            parsed = urlparse(url)
+        except Exception as e:
+            raise InvalidScholarURLError(f"Malformed URL: {str(e)}")
+
+        # Check if it's a Google Scholar domain
+        valid_domains = ["scholar.google.com", "scholar.google.co.in"]
+        if parsed.netloc not in valid_domains:
+            raise InvalidScholarURLError(
+                f"URL must be from Google Scholar domain (e.g., scholar.google.com). Got: {parsed.netloc}"
+            )
+
+        # Check if it's a citations/profile page
+        if not parsed.path.startswith("/citations"):
+            raise InvalidScholarURLError(
+                "URL must be a Google Scholar citations/profile page (path should start with /citations)"
+            )
+
+        # Check if user parameter exists
+        query_params = parse_qs(parsed.query)
+        if "user" not in query_params:
+            raise InvalidScholarURLError(
+                "URL must contain a 'user' parameter (e.g., ?user=USER_ID)"
+            )
+
+        logger.info(f"{self.agent_name}: URL validation passed for {url}")
+
+    async def _check_rate_limit(self, requests_per_minute: int = 10) -> None:
+        """
+        Check and enforce rate limiting to avoid API abuse.
+
+        Args:
+            requests_per_minute: Maximum allowed requests per minute
+
+        Raises:
+            RateLimitError: If rate limit would be exceeded
+        """
+        if self.last_request_time:
+            time_since_last = (datetime.utcnow() - self.last_request_time).total_seconds()
+
+            # If less than minimum interval, wait
+            min_interval = 60.0 / requests_per_minute  # seconds between requests
+            if time_since_last < min_interval:
+                wait_time = min_interval - time_since_last
+                logger.info(f"{self.agent_name}: Rate limiting - waiting {wait_time:.2f}s")
+                await asyncio.sleep(wait_time)
+
     def get_agent_status(self) -> Dict[str, str]:
         """
         Get current status of the agent.
@@ -161,8 +286,12 @@ class DataFetchAgent:
         return {
             "agent_name": self.agent_name,
             "status": "ready",
+            "request_count": self.request_count,
+            "last_request": self.last_request_time.isoformat() if self.last_request_time else None,
             "capabilities": [
                 "fetch_scholar_data",
-                "fetch_publication_details"
+                "fetch_publication_details",
+                "validate_scholar_url",
+                "rate_limiting"
             ]
         }
